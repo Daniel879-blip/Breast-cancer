@@ -9,8 +9,7 @@ Single-file Streamlit app with:
 - charts: BAT convergence, ROC, confusion matrix, class distribution, correlation heatmap, feature importance
 - hard-coded patient form fields that map to dataset columns (mapping editable)
 - step-by-step written explanations for training & predictions
-- Added: explicit explanations under each chart stating how values are computed
-- Added: display of accuracy, precision, recall and F1-score metrics
+- added: explicit display of accuracy, precision, F1 and explanatory text for each chart/metric
 """
 
 import streamlit as st
@@ -33,7 +32,7 @@ from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.naive_bayes import GaussianNB
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.compose import ColumnTransformer
-from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc, precision_score, recall_score, f1_score
+from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc, precision_score, f1_score, accuracy_score
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.utils import resample
 
@@ -68,6 +67,12 @@ def explain_prediction_text(prob, label):
             "Interpretation: The model found the entered features more similar to benign cases in the training data.\n"
             "Recommended next steps: routine surveillance and clinical follow-up if symptoms persist."
         )
+
+def format_pct(x):
+    try:
+        return f"{x*100:.2f}%"
+    except Exception:
+        return "N/A"
 
 # -----------------------
 # Synthetic builtin dataset (balanced by default)
@@ -338,12 +343,10 @@ counts = y_ser.value_counts().to_dict()
 fig_pie = px.pie(values=list(counts.values()), names=list(counts.keys()), title="Class distribution")
 st.plotly_chart(fig_pie, use_container_width=True)
 st.markdown(
-    """
-    **Explanation:** The pie chart shows the count (and percentage) of each class in the target column.
-    - Values are simple counts of rows labeled with each class (e.g., `0` = benign, `1` = malignant).
-    - Percentages are `count_class / total_rows`.
-    - Use this chart to check class imbalance prior to training; heavy imbalance can bias the classifier.
-    """
+    "**Explanation — Class distribution**  \n"
+    "This pie chart shows the proportion of samples labeled with each target class in the dataset. "
+    "Counts are calculated by `y_ser.value_counts()`. The model's baseline expectations depend on these class ratios — "
+    "if one class dominates, simple accuracy can be misleading and balancing strategies may be used (see 'Class balancing' in the sidebar)."
 )
 
 # -----------------------
@@ -493,14 +496,6 @@ if run_train:
         fig_fin = px.line(y=convergence_curve, labels={'value':'Best CV score','index':'Generation'}, title="BAT Convergence (final)")
         fig_fin.update_traces(mode='lines+markers')
         conv_placeholder.plotly_chart(fig_fin, use_container_width=True)
-        st.markdown(
-            """
-            **Explanation (BAT convergence):**
-            - The Y-axis shows the best cross-validation (CV) score found so far by the population of bats at each generation.
-            - The CV score is the mean 5‑fold cross-validation accuracy (the fraction of correctly predicted samples) using a GaussianNB classifier on the features selected by that bat.
-            - Improvements in the curve indicate the algorithm found feature subsets with better average CV performance.
-            """
-        )
     except Exception:
         pass
 
@@ -517,47 +512,41 @@ if run_train:
     # evaluate
     y_pred = clf.predict(X_te)
     report = classification_report(y_te, y_pred, output_dict=True, zero_division=0)
-    acc = float((y_pred == y_te).mean())
+    acc = float(accuracy_score(y_te, y_pred))
     prec = float(precision_score(y_te, y_pred, zero_division=0))
-    rec = float(recall_score(y_te, y_pred, zero_division=0))
     f1 = float(f1_score(y_te, y_pred, zero_division=0))
 
-    # show summary metrics prominently
-    metrics_placeholder.markdown("### Evaluation metrics (hold-out test set)")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Accuracy", f"{acc:.3f}")
-    m2.metric("Precision", f"{prec:.3f}")
-    m3.metric("Recall", f"{rec:.3f}")
-    m4.metric("F1-score", f"{f1:.3f}")
-
-    st.subheader("Model performance (hold-out test) — detailed")
-    st.dataframe(pd.DataFrame(report).transpose().style.background_gradient(cmap='Blues'))
-    st.markdown(
-        """
-        **Metrics explanation**
-        - **Accuracy** = (TP + TN) / (TP + TN + FP + FN). It's the overall fraction of correct predictions.
-        - **Precision** = TP / (TP + FP). Of the instances predicted positive, how many were actually positive.
-        - **Recall (Sensitivity)** = TP / (TP + FN). Of the actual positives, how many were detected.
-        - **F1-score** = 2 * (Precision * Recall) / (Precision + Recall). Harmonic mean of precision and recall; useful for imbalanced classes.
-        (TP = true positives, TN = true negatives, FP = false positives, FN = false negatives)
-        """
-    )
+    # display metrics prominently
+    with metrics_placeholder.container():
+        st.subheader("Model performance (hold-out test)")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Accuracy", f"{acc:.3f}", delta=None)
+        m2.metric("Precision", f"{prec:.3f}")
+        m3.metric("F1 score", f"{f1:.3f}")
+        st.markdown(
+            "**How these metrics are calculated:**  \n"
+            "- **Accuracy** = (correct predictions) / (total predictions). Computed with `accuracy_score(y_true, y_pred)`.  \n"
+            "- **Precision** = true positives / (true positives + false positives). Computed with `precision_score(y_true, y_pred)`. "
+            "It answers: *Of the samples predicted positive, how many actually were positive?*  \n"
+            "- **F1 score** = harmonic mean of precision and recall. Computed with `f1_score(y_true, y_pred)`. "
+            "It balances precision and recall and is useful with imbalanced classes."
+        )
+        st.dataframe(pd.DataFrame(report).transpose().style.background_gradient(cmap='Blues'))
 
     # confusion matrix
     cm = confusion_matrix(y_te, y_pred)
     cm_fig = go.Figure(data=go.Heatmap(z=cm, x=["Pred 0","Pred 1"], y=["True 0","True 1"], colorscale="Blues"))
-    cm_fig.update_layout(title="Confusion Matrix", xaxis_title="Predicted label", yaxis_title="True label")
+    cm_fig.update_layout(title="Confusion Matrix")
     st.plotly_chart(cm_fig, use_container_width=True)
     st.markdown(
-        f"""
-        **Confusion Matrix explanation:**  
-        - Matrix rows = *true labels*, columns = *predicted labels*.  
-        - Top-left: True Negatives (TN) = {cm[0,0]}  
-        - Top-right: False Positives (FP) = {cm[0,1]}  
-        - Bottom-left: False Negatives (FN) = {cm[1,0]}  
-        - Bottom-right: True Positives (TP) = {cm[1,1]}  
-        These counts are used to compute the metrics above (accuracy, precision, recall, F1).
-        """
+        "**Explanation — Confusion matrix**  \n"
+        "Rows are the TRUE classes and columns are the PREDICTED classes. "
+        "`confusion_matrix(y_true, y_pred)` returns a 2×2 array for binary problems:  \n"
+        "- Top-left: True Negatives (TN)  \n"
+        "- Top-right: False Positives (FP)  \n"
+        "- Bottom-left: False Negatives (FN)  \n"
+        "- Bottom-right: True Positives (TP)  \n"
+        "Precision = TP / (TP + FP). Recall = TP / (TP + FN). Accuracy = (TP + TN) / total."
     )
 
     # ROC
@@ -568,15 +557,13 @@ if run_train:
         roc_fig = go.Figure()
         roc_fig.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines', name=f"AUC={roc_auc:.3f}"))
         roc_fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode='lines', line=dict(dash='dash'), name='Chance'))
-        roc_fig.update_layout(title="ROC Curve", xaxis_title="False Positive Rate (FPR)", yaxis_title="True Positive Rate (TPR)")
+        roc_fig.update_layout(title="ROC Curve", xaxis_title="FPR", yaxis_title="TPR")
         st.plotly_chart(roc_fig, use_container_width=True)
         st.markdown(
-            """
-            **ROC Curve & AUC explanation:**  
-            - The ROC curve plots True Positive Rate vs False Positive Rate at varying probability thresholds.  
-            - AUC (area under curve) summarizes the curve: 1.0 is perfect, 0.5 is random chance.  
-            - Use AUC to assess overall separability independent of a single threshold.
-            """
+            "**Explanation — ROC & AUC**  \n"
+            "ROC (Receiver Operating Characteristic) plots True Positive Rate (Recall) vs False Positive Rate at different probability thresholds. "
+            "`roc_curve(y_true, y_score)` computes TPR and FPR at many thresholds.  \n"
+            "AUC (Area Under Curve) summarizes the ROC curve: 1.0 is perfect, 0.5 is random. Computed with `auc(fpr, tpr)`."
         )
     except Exception:
         pass
@@ -589,12 +576,10 @@ if run_train:
             st.subheader("Feature importance (Mutual Information on selected features)")
             st.dataframe(mi_df.style.background_gradient(cmap='Oranges'))
             st.markdown(
-                """
-                **Mutual information explanation:**  
-                - Mutual information (MI) measures how much knowing a feature reduces uncertainty about the label.
-                - Higher MI means the feature carries more information about the target.
-                - MI is non-negative and does not indicate direction (positive/negative correlation).
-                """
+                "**Explanation — Feature importance (Mutual Information)**  \n"
+                "Mutual Information (MI) measures how much information about the target is contained in a feature. "
+                "`mutual_info_classif(X, y)` returns a non-negative score per feature; higher means the feature is more informative about the label. "
+                "MI does not indicate direction (positive/negative) — it only measures dependence."
             )
     except Exception:
         pass
@@ -739,13 +724,6 @@ if submit_patient:
                     chosen = [feat_names[i] for i in sel_idx]
                     st.subheader("Model used transformed features (sample)")
                     st.write(chosen[:40])
-                    st.markdown(
-                        """
-                        **Which features were used for this single prediction:**  
-                        - The model was trained on a transformed representation of the original columns (categoricals one-hot encoded, numerics scaled).
-                        - Only the *selected transformed features* (listed above) were used when training the classifier and thus for this prediction.
-                        """
-                    )
             except Exception:
                 pass
     else:
@@ -765,12 +743,10 @@ if len(numeric_cols) > 1:
     sns.heatmap(X_df[numeric_cols].corr(), cmap="coolwarm", ax=ax)
     st.pyplot(fig)
     st.markdown(
-        """
-        **Correlation heatmap explanation:**  
-        - Shows Pearson correlation coefficients between numeric features (range -1 to 1).  
-        - Value near 1: strong positive linear relationship; near -1: strong negative relationship; near 0: little linear relationship.  
-        - Used to detect multicollinearity and to inform feature selection decisions.
-        """
+        "**Explanation — Correlation heatmap**  \n"
+        "This heatmap shows Pearson correlation coefficients between numeric features, computed by `X_df[numeric_cols].corr()`. "
+        "Values range from -1 (perfect negative correlation) to +1 (perfect positive correlation). "
+        "High absolute correlations indicate strong linear relationships; correlated features can lead to redundant information."
     )
 
 # Distributions of numeric features (first 6)
@@ -780,13 +756,10 @@ for col in plot_cols:
     fig = px.histogram(X_df, x=col, color=y_ser, nbins=30, title=f"{col} distribution by target", marginal="box")
     st.plotly_chart(fig, use_container_width=True)
     st.markdown(
-        f"""
-        **{col} distribution explanation:**  
-        - Count histograms split by target class (colors represent class labels).  
-        - Shows how the values of `{col}` differ between classes.  
-        - The small box plot (marginal) summarizes median and spread.  
-        - Useful to spot separable features or outliers.
-        """
+        f"**Explanation — {col} distribution by target**  \n"
+        f"This histogram shows how the numeric feature **{col}** is distributed across the dataset, split by the target label. "
+        "Counts were computed per bin for each label. The small box plot (if shown) displays median and quartiles. "
+        "Look for shifts in the distributions between classes — those indicate potential predictive power."
     )
 
 # Selected features & importance if available
@@ -811,11 +784,10 @@ if st.session_state.get('selected_indices'):
                 mi_df = pd.DataFrame({'feature': chosen, 'mi': mi}).sort_values('mi', ascending=False)
                 st.dataframe(mi_df.style.background_gradient(cmap='Oranges'))
                 st.markdown(
-                    """
-                    **Selected features explanation:**  
-                    - These are the transformed features BAT chose to keep for model training.  
-                    - Mutual information (MI) shown here was computed on the full dataset (using the transformed selected features) and measures how informative each feature is about the target.
-                    """
+                    "**Explanation — Selected features & MI on dataset**  \n"
+                    "This shows the features chosen by BAT (on transformed feature space). Mutual Information (MI) was computed with `mutual_info_classif` "
+                    "on the transformed features across the whole dataset to provide an estimate of how informative each selected feature is about the label. "
+                    "MI is non-directional and measures dependency, not causation."
                 )
             except Exception:
                 pass
@@ -826,16 +798,14 @@ if st.session_state.get('selected_indices'):
 st.markdown("""
 ## Step-by-step: What the app does & how to interpret graphs
 
-**1) Data Upload**: The user uploads a CSV (patient data), and the app processes it. If no file is uploaded, the built-in synthetic dataset is used.  
-**2) BAT Training**: BAT (Bat Algorithm) selects the best subset of features for classification by optimizing 5‑fold cross‑validation accuracy of GaussianNB. The convergence plot shows the best CV score per generation.  
-**3) Model Prediction**: Once trained, the model is ready to predict based on user input. The prediction uses the preprocessor (one-hot for categoricals, scaling for numerics), keeps only the BAT-selected transformed features, then runs GaussianNB.  
-**4) Evaluation**: View performance metrics (accuracy, precision, recall, F1, confusion matrix, ROC AUC). Metrics are computed on a held-out test split (20%).  
-**5) Prediction Explanation**: The app explains the result and next steps.
+**1) Data Upload**: The user uploads a CSV (patient data), and the app processes it. If no file is uploaded, the built-in synthetic dataset is used.
+**2) BAT Training**: BAT (Bat Algorithm) selects the best subset of features for classification. It runs through multiple generations, evolving the solution. The objective inside BAT uses 5-fold cross-validated accuracy (`cross_val_score`) on the selected transformed features.
+**3) Model Prediction**: Once trained, the Gaussian Naive Bayes model is fitted on the selected features and used for predictions. Probabilities (when available) come from `predict_proba`.
+**4) Evaluation**: View performance metrics (accuracy, precision, F1), confusion matrix, ROC/AUC and feature importance (mutual information).
+**5) Prediction Explanation**: The app returns a human-readable explanation and shows which dataset columns were used for the patient input.
 
 ### Important notes:
 - This is a research/educational tool — **not a diagnostic device**.
 - Always consult healthcare professionals for diagnosis and treatment.
 """)
 
-st.markdown("---")
-st.write("If you'd like, I can now: 1) package `app.py` + `requirements.txt` + the synthetic CSV into a ZIP for download, or 2) run training here on the synthetic dataset and return the `models/` folder. Which would you like?")
