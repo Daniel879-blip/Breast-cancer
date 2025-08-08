@@ -1,28 +1,8 @@
-"""
-Advanced Streamlit App: Breast Cancer Prediction (BAT feature selection + Naive Bayes)
-
-How to use:
-- Put this file (app.py) in your project root.
-- Optional: place a CSV dataset in data/ or upload via sidebar. CSV should have features and a final target column
-  named 'target' OR 'diagnosis' (M/B). If target is M/B it will be mapped automatically.
-- Run: streamlit run app.py
-
-Notes:
-- Uses an internal BAT implementation (binary feature selector).
-- Classifier choices show only Naive Bayes (others can be added).
-- Plotly provides interactive charts (make sure 'plotly' is installed).
-"""
-
 # app.py
 """
-Advanced Streamlit App: Breast Cancer Prediction (Train from Sidebar)
-Features:
-- Upload arbitrary CSV and pick the target column
-- BAT feature selection (adjustable parameters in sidebar)
-- Train Naive Bayes from the sidebar (BAT -> train)
-- Dynamic patient form (only uses features chosen by BAT)
-- Interactive charts: convergence (live), ROC, confusion matrix, distribution, corr heatmap
-- Explanations and downloadable patient report
+Advanced Streamlit app — Trainable from sidebar
+Breast Cancer Predictor — BAT feature selection + Gaussian Naive Bayes
+Single-file solution (no external utils required)
 """
 
 import streamlit as st
@@ -37,8 +17,10 @@ from io import StringIO
 import plotly.express as px
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 # sklearn
+import sklearn
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.naive_bayes import GaussianNB
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
@@ -47,15 +29,66 @@ from sklearn.pipeline import Pipeline
 from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
 from sklearn.feature_selection import mutual_info_classif
 
-# persistence (optional)
+# persistence
 from joblib import dump, load
 
-# ---------- Utility / BAT implementation ----------
+st.set_page_config(page_title="Breast Cancer Predictor — Trainable", layout="wide", initial_sidebar_state="expanded")
+st.title("🧬 Breast Cancer Predictor — Train from Sidebar (BAT + Naive Bayes)")
+st.markdown("**Instructions:** Upload a CSV (or use example), pick the label/target column, adjust BAT parameters in the sidebar, then click **Run BAT & Train**. After training the patient form will appear for predictions.")
+
+# -----------------------------------------------------------------------------
+# Utility / compatibility helpers
+# -----------------------------------------------------------------------------
+def make_onehot_encoder_compat(**kwargs):
+    """
+    Create a OneHotEncoder that is compatible across scikit-learn versions.
+    Newer versions use `sparse_output=False`, older use `sparse=False`.
+    Pass any other kwargs you'd like (e.g., handle_unknown).
+    """
+    ver = sklearn.__version__
+    # We'll attempt to set sparse_output first (newer sklearn), else fallback to sparse
+    try:
+        enc = OneHotEncoder(**{**kwargs, **({"sparse_output": False})})
+    except TypeError:
+        # older scikit-learn
+        enc = OneHotEncoder(**{**kwargs, **({"sparse": False})})
+    return enc
+
+def explain_prediction_text(prob, label):
+    """
+    Human-readable explanation for a prediction.
+    prob: probability (0..1) for predicted class
+    label: 1 => positive (malignant); 0 => negative (benign)
+    """
+    pct = None if prob is None else f"{prob*100:.1f}%"
+    if label == 1:
+        return (
+            f"**Prediction:** POSITIVE (likely malignant). Confidence: **{pct}**.\n\n"
+            "Interpretation: The model found the entered features more similar to malignant cases "
+            "in the training data. Recommended next steps:\n"
+            "1. Urgent clinical follow-up (specialist consult).\n"
+            "2. Diagnostic imaging (mammogram/ultrasound/MRI) and biopsy if indicated.\n"
+            "3. Use this result as a preliminary screening aid only — not a definitive diagnosis."
+        )
+    else:
+        return (
+            f"**Prediction:** NEGATIVE (likely benign). Confidence: **{pct}**.\n\n"
+            "Interpretation: The model found the entered features more similar to benign cases "
+            "in the training data. Recommended next steps:\n"
+            "1. Continue routine surveillance and clinical follow-up.\n"
+            "2. If symptoms persist or clinical concern remains, pursue diagnostic imaging.\n"
+            "3. Always consult a medical professional for final decisions."
+        )
+
+# -----------------------------------------------------------------------------
+# BAT algorithm (binary) and small helpers
+# -----------------------------------------------------------------------------
 def objective_cv_score(features, labels, mask):
     """
-    features: np.array (n_samples, n_features)
-    labels: np.array (n_samples,)
-    mask: binary 1/0 list/array selecting features
+    Evaluate a binary mask using cross-validated GaussianNB accuracy.
+    features: numpy array (n_samples, n_features)
+    labels: numpy array (n_samples,)
+    mask: list/array of 0/1 selecting features
     """
     mask = np.array(mask, dtype=bool)
     if mask.sum() == 0:
@@ -68,14 +101,12 @@ def objective_cv_score(features, labels, mask):
     except Exception:
         return 0.0
 
-def bat_feature_selection(features, labels, num_bats=20, max_gen=40, loudness=0.5, pulse_rate=0.5,
-                          progress_updater=None, sleep_per_gen=0.0):
+def bat_feature_selection(features, labels, num_bats=20, max_gen=40, loudness=0.5, pulse_rate=0.5, progress_updater=None, sleep_per_gen=0.0):
     """
-    Binary BAT algorithm with optional progress_updater callback.
-    progress_updater(gen_index, best_score, convergence_so_far, max_gen) -> None
+    Binary BAT algorithm. Returns selected_feature_indices, convergence_curve
+    progress_updater(gen_idx, best_score, convergence_so_far, max_gen) is optional.
     """
     n_feats = features.shape[1]
-    # init
     positions = (np.random.rand(num_bats, n_feats) > 0.5).astype(int)
     velocities = np.zeros((num_bats, n_feats))
     freq_min, freq_max = 0.0, 2.0
@@ -93,7 +124,6 @@ def bat_feature_selection(features, labels, num_bats=20, max_gen=40, loudness=0.
             prob = 1.0 / (1.0 + np.exp(-velocities[i]))
             new_pos = (np.random.rand(n_feats) < prob).astype(int)
 
-            # local flip
             if np.random.rand() > pulse_rate:
                 flip_mask = (np.random.rand(n_feats) < 0.05).astype(int)
                 tmp = best_pos.copy()
@@ -107,209 +137,199 @@ def bat_feature_selection(features, labels, num_bats=20, max_gen=40, loudness=0.
             if new_score > best_score:
                 best_pos = new_pos.copy()
                 best_score = new_score
-        convergence.append(best_score)
 
-        # callback for UI updates
+        convergence.append(best_score)
         if progress_updater is not None:
             try:
                 progress_updater(gen, best_score, convergence.copy(), max_gen)
             except Exception:
                 pass
-
         if sleep_per_gen > 0:
             time.sleep(sleep_per_gen)
 
     selected_indices = [int(idx) for idx, bit in enumerate(best_pos) if bit == 1]
     return selected_indices, convergence
 
-# ---------- App UI ----------
-st.set_page_config(page_title="Breast Cancer Predictor (trainable)", layout="wide", initial_sidebar_state="expanded")
-st.title("🧬 Breast Cancer Predictor — Train from Sidebar (BAT + Naive Bayes)")
-st.markdown("**Instructions:** Upload a CSV (or use sample), choose the target column in the sidebar, adjust BAT parameters, then click **Run BAT & Train**. After training the patient form will appear and you can predict immediately.")
+# -----------------------------------------------------------------------------
+# Sidebar: dataset upload and parameter controls
+# -----------------------------------------------------------------------------
+st.sidebar.header("1) Dataset and Parameters")
 
-# ---- Sidebar: Dataset upload & controls ----
-st.sidebar.header("1) Dataset & Target")
-uploaded = st.sidebar.file_uploader("Upload CSV dataset (optional). If not provided, sample demo will be used.", type=["csv"])
-use_example = st.sidebar.checkbox("Use example demo dataset (if no upload)", value=True if uploaded is None else False)
+uploaded_file = st.sidebar.file_uploader("Upload CSV dataset (optional). Last column often target; choose target below.", type=["csv"])
+use_example = st.sidebar.checkbox("Use demo example dataset if no upload", value=True if uploaded_file is None else False)
 
-# After upload, let user pick target column
-# we'll load the df (small preview) first
-def safe_read_csv(uploaded_file):
+# BAT params
+st.sidebar.subheader("BAT Parameters (Feature Selection)")
+num_bats = st.sidebar.slider("Number of bats", 6, 80, 24)
+max_gen = st.sidebar.slider("Max generations", 5, 120, 40)
+loudness = st.sidebar.slider("Loudness (A)", 0.05, 1.0, 0.5, step=0.05)
+pulse_rate = st.sidebar.slider("Pulse rate (r)", 0.0, 1.0, 0.5, step=0.05)
+sleep_per_gen = st.sidebar.slider("UI speed (seconds per generation)", 0.0, 0.25, 0.02, step=0.01)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Classifier")
+clf_choice = st.sidebar.selectbox("Classifier (for now)", ["Naive Bayes (Gaussian)"])
+st.sidebar.markdown("---")
+run_button = st.sidebar.button("🔁 Run BAT & Train")
+save_artifacts = st.sidebar.checkbox("Save artifacts to ./models (model, preprocessor, selected indices)", value=False)
+
+# -----------------------------------------------------------------------------
+# Load dataset (uploaded or demo)
+# -----------------------------------------------------------------------------
+def safe_read(uploaded):
     try:
-        return pd.read_csv(uploaded_file)
+        df = pd.read_csv(uploaded)
+        return df
     except Exception as e:
         st.sidebar.error(f"Could not read CSV: {e}")
         return None
 
-if uploaded is not None:
-    df_raw = safe_read_csv(uploaded)
+if uploaded_file is not None:
+    df_raw = safe_read(uploaded_file)
 elif use_example:
-    # build a small demo dataset (based on sklearn) but add age/sex/family_history style fields if helpful
+    # Build a demo dataset from sklearn plus simple demographic columns to make patient form friendly
     from sklearn.datasets import load_breast_cancer
     d = load_breast_cancer(as_frame=True)
-    df_temp = pd.concat([d.data, d.target.rename("target")], axis=1)
-    # add synthetic demographics to demo for user-friendly patient form
-    rng = np.random.default_rng(seed=42)
-    n = df_temp.shape[0]
-    df_temp['age'] = rng.integers(30, 85, size=n)
-    # all female mostly — include 'sex' for completeness (most female)
-    df_temp['sex'] = rng.choice(['Female','Male'], size=n, p=[0.98, 0.02])
-    df_temp['family_history'] = rng.choice(['Yes','No'], size=n, p=[0.12, 0.88])
-    df_raw = df_temp.copy()
+    df_demo = pd.concat([d.data, d.target.rename("target")], axis=1)
+    rng = np.random.default_rng(42)
+    n = df_demo.shape[0]
+    df_demo['age'] = rng.integers(30, 85, size=n)
+    df_demo['sex'] = rng.choice(['Female','Male'], size=n, p=[0.98, 0.02])
+    df_demo['family_history'] = rng.choice(['Yes','No'], size=n, p=[0.12, 0.88])
+    df_raw = df_demo
 else:
     df_raw = None
 
 if df_raw is None:
-    st.sidebar.warning("No dataset loaded yet.")
-    # still continue to render other controls but training disabled
-else:
-    st.sidebar.write("Preview (first 5 rows):")
-    st.sidebar.dataframe(df_raw.head())
-
-# target column selection
-if df_raw is not None:
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Pick the target (label) column")
-    tgt_col = st.sidebar.selectbox("Target column (choose the column that stores 0/1 or M/B)", options=list(df_raw.columns), index=len(df_raw.columns)-1)
-else:
-    tgt_col = None
-
-# allow user to override mapping if target is 'M'/'B' or string
-st.sidebar.markdown("---")
-st.sidebar.subheader("2) BAT Parameters (Feature Selection)")
-num_bats = st.sidebar.slider("Number of bats", 6, 80, 24)
-max_gen = st.sidebar.slider("Generations", 5, 120, 40)
-loudness = st.sidebar.slider("Loudness (A)", 0.05, 1.0, 0.5, step=0.05)
-pulse_rate = st.sidebar.slider("Pulse rate (r)", 0.0, 1.0, 0.5, step=0.05)
-sleep_per_gen = st.sidebar.slider("UI speed (sleep per generation, sec)", 0.0, 0.25, 0.02, step=0.01)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("3) Classifier")
-clf_choice = st.sidebar.selectbox("Classifier (for now Naive Bayes only)", ["Naive Bayes (Gaussian)"])
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("4) Train / Retrain")
-run_button = st.sidebar.button("🔁 Run BAT & Train")
-
-# Save artifacts option
-st.sidebar.markdown("Save & export")
-save_artifacts = st.sidebar.checkbox("Save trained model and metadata to ./models", value=False)
-
-# ---- Main area: dataset checks and cleaning ----
-if df_raw is None:
-    st.info("Upload a CSV in the sidebar or enable the example dataset to proceed.")
+    st.info("Upload a CSV or enable the example dataset to begin.")
     st.stop()
 
-# Clean dataset and prepare X, y
-def clean_dataset(df, target_col):
-    df = df.copy()
-    df = df.dropna(how='all')
-    # if target col contains 'M'/'B' map it
-    if df[target_col].dtype == object or df[target_col].dtype.name == 'category':
-        # try to map common labels
-        uniq = df[target_col].dropna().unique()
-        uniq_lower = [str(x).lower() for x in uniq]
-        if set(uniq_lower) >= set(['m','b']) or set(uniq_lower) >= set(['malignant','benign']):
-            # map M/B or malignant/benign -> 1/0
-            df[target_col] = df[target_col].map(lambda x: 1 if str(x).lower().startswith('m') else 0)
+# Show preview and allow selecting target column
+with st.expander("Preview dataset (first 5 rows)"):
+    st.dataframe(df_raw.head())
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Pick target (label) column")
+tgt_col = st.sidebar.selectbox("Target column (choose label column)", options=list(df_raw.columns), index=len(df_raw.columns)-1)
+
+# -----------------------------------------------------------------------------
+# Data cleaning & splitting helpers
+# -----------------------------------------------------------------------------
+def clean_and_prepare(df, target_col):
+    dfc = df.copy()
+    dfc = dfc.dropna(how='all')  # remove empty rows
+    # If target is object-like and contains 'M'/'B' or 'malignant'/'benign' map to 1/0
+    if dfc[target_col].dtype == object or str(dfc[target_col].dtype).startswith('category'):
+        unique_vals = list(dfc[target_col].dropna().unique())
+        unique_lower = [str(x).lower() for x in unique_vals]
+        if any(x.startswith('m') for x in unique_lower) and any(x.startswith('b') for x in unique_lower):
+            dfc[target_col] = dfc[target_col].map(lambda x: 1 if str(x).lower().startswith('m') else 0)
         else:
-            # try to convert to numbers
+            # attempt numeric conversion
             try:
-                df[target_col] = pd.to_numeric(df[target_col])
+                dfc[target_col] = pd.to_numeric(dfc[target_col])
             except Exception:
-                # leave as-is, will fail later
                 pass
     # drop rows with missing target
-    df = df.loc[df[target_col].notna()].copy()
-    y = df[target_col]
-    X = df.drop(columns=[target_col])
-    # drop pure-id-like columns
-    for c in X.columns:
-        if c.lower() in ('id','patient_id','pid'):
-            X = X.drop(columns=[c])
-    return X.reset_index(drop=True), y.reset_index(drop=True)
+    dfc = dfc.loc[dfc[target_col].notna()].copy()
+    y = dfc[target_col]
+    X = dfc.drop(columns=[target_col])
+    # drop id columns if present
+    for col in list(X.columns):
+        if col.lower() in ('id','patient_id','pid'):
+            X.drop(columns=[col], inplace=True)
+    X = X.reset_index(drop=True)
+    y = y.reset_index(drop=True)
+    return X, y
 
-# Try cleaning
-try:
-    X_df, y_ser = clean_dataset(df_raw, tgt_col) if tgt_col is not None else (None, None)
-except Exception as e:
-    st.error(f"Error preparing dataset: {e}")
-    st.stop()
+X_df, y_ser = clean_and_prepare(df_raw, tgt_col)
 
-# show quick dataset summary
+# Basic dataset info
 st.subheader("Dataset summary")
-col1, col2, col3 = st.columns([1,1,1])
-col1.write(f"Rows: **{X_df.shape[0]}**")
-col2.write(f"Columns (features): **{X_df.shape[1]}**")
-col3.write(f"Target column: **{tgt_col}**")
+c1, c2, c3 = st.columns(3)
+c1.metric("Rows", f"{X_df.shape[0]}")
+c2.metric("Features", f"{X_df.shape[1]}")
+c3.metric("Target column", f"{tgt_col}")
 
-# missing values summary
-missing = X_df.isnull().sum()
-if missing.sum() > 0:
-    st.warning("Missing values detected in features. Rows with missing target were removed. Missing feature values will be handled (dropped or imputed) before training.")
-    with st.expander("Missing values per column"):
-        st.dataframe(missing[missing > 0])
+# Missing values
+missing_counts = X_df.isna().sum()
+if missing_counts.sum() > 0:
+    with st.expander("Missing values (click to view)"):
+        st.dataframe(missing_counts[missing_counts > 0])
 
-# show class balance
-st.write("Class distribution (target)")
+# Class balance
+st.subheader("Target class distribution")
 class_counts = y_ser.value_counts().to_dict()
-fig_pie = px.pie(names=list(class_counts.keys()), values=list(class_counts.values()), title="Class distribution")
+fig_pie = px.pie(values=list(class_counts.values()), names=list(class_counts.keys()), title="Class distribution")
 st.plotly_chart(fig_pie, use_container_width=True)
 
-# ---- Preprocessing: infer numeric vs categorical ----
+# Feature types detected
 numeric_cols = X_df.select_dtypes(include=[np.number]).columns.tolist()
-categorical_cols = X_df.select_dtypes(exclude=[np.number]).columns.tolist()
+cat_cols = X_df.select_dtypes(exclude=[np.number]).columns.tolist()
+st.markdown(f"**Detected features:** {len(numeric_cols)} numeric, {len(cat_cols)} categorical.")
+if len(cat_cols) > 0:
+    with st.expander("Categorical columns detected"):
+        st.write(cat_cols)
 
-st.markdown("**Detected feature types**")
-st.write(f"Numeric: {numeric_cols[:12]}{'...' if len(numeric_cols)>12 else ''}")
-st.write(f"Categorical: {categorical_cols[:12]}{'...' if len(categorical_cols)>12 else ''}")
-
-# Build preprocessing pipeline (fit later at training time)
+# -----------------------------------------------------------------------------
+# Preprocessor builder (OneHotEncoder compatibility)
+# -----------------------------------------------------------------------------
 def build_preprocessor(Xdf):
     num_cols = Xdf.select_dtypes(include=[np.number]).columns.tolist()
-    cat_cols = Xdf.select_dtypes(exclude=[np.number]).columns.tolist()
+    cat_cols_local = Xdf.select_dtypes(exclude=[np.number]).columns.tolist()
     transformers = []
-    if len(cat_cols) > 0:
-        transformers.append(('cat', OneHotEncoder(handle_unknown='ignore', sparse=False), cat_cols))
+    if len(cat_cols_local) > 0:
+        # create compat OneHotEncoder
+        ohe = make_onehot_encoder_compat(handle_unknown='ignore')
+        transformers.append(('cat', ohe, cat_cols_local))
     if len(num_cols) > 0:
         transformers.append(('num', StandardScaler(), num_cols))
     col_trans = ColumnTransformer(transformers, remainder='drop', sparse_threshold=0)
-    return col_trans, num_cols, cat_cols
+    return col_trans, num_cols, cat_cols_local
 
 preproc, num_cols, cat_cols = build_preprocessor(X_df)
 
-# placeholders for training-time visual updates
+# -----------------------------------------------------------------------------
+# Placeholders for live UI updates while running BAT
+# -----------------------------------------------------------------------------
 conv_placeholder = st.empty()
-progress_placeholder = st.empty()
-status_placeholder = st.empty()
+progress_placeholder = st.sidebar.empty()
+status_placeholder = st.sidebar.empty()
 metrics_placeholder = st.empty()
 
-# trained artifacts (initialized None)
-trained_model = None
-selected_feature_indices = []
+trained_clf = None
+trained_preproc = None
+selected_indices = []
 transformed_feature_names = []
 convergence_curve = []
 
-# training logic (run when sidebar button pressed)
+# -----------------------------------------------------------------------------
+# Train (Run BAT & Train) — triggered by sidebar button
+# -----------------------------------------------------------------------------
 if run_button:
-    status_placeholder.info("Starting BAT feature selection and training...")
-    # prepare features and labels (drop rows with NaNs in features or imputable)
-    # simple handling: drop rows with any missing numeric/categorical (you can replace with imputation later)
-    working_df = pd.concat([X_df, y_ser], axis=1).dropna().reset_index(drop=True)
-    X_clean = working_df.drop(columns=[tgt_col]) if tgt_col in working_df.columns else working_df.drop(columns=[y_ser.name])
-    y_clean = working_df[y_ser.name] if y_ser.name in working_df.columns else working_df.iloc[:, -1]
+    status_placeholder.info("Starting preprocessing and BAT feature selection...")
 
-    # rebuild preprocessor to be safe
+    # Simple missing handling: drop any rows with missing features for this run
+    work_df = pd.concat([X_df, y_ser], axis=1).dropna().reset_index(drop=True)
+    if work_df.shape[0] < 10:
+        st.warning("After dropping missing rows there are fewer than 10 samples — training may be unreliable.")
+
+    X_clean = work_df.drop(columns=[tgt_col])
+    y_clean = work_df[tgt_col]
+    # rebuild preproc on cleaned X
     preproc, num_cols, cat_cols = build_preprocessor(X_clean)
-
-    # fit preprocessor to whole X
     try:
         preproc.fit(X_clean)
-        # get transformed feature names
+    except Exception as e:
+        st.error(f"Preprocessor fit failed: {e}")
+        st.stop()
+
+    try:
+        # get transformed feature names (compat)
         try:
             transformed_feature_names = list(preproc.get_feature_names_out())
         except Exception:
-            # compatibility fallback: construct manually
+            # manual construction fallback
             transformed_feature_names = []
             if cat_cols:
                 ohe = preproc.named_transformers_['cat']
@@ -319,104 +339,103 @@ if run_button:
                         transformed_feature_names.append(f"{col}__{lvl}")
             if num_cols:
                 transformed_feature_names.extend(num_cols)
-    except Exception as e:
-        st.error(f"Failed to fit preprocessor: {e}")
-        st.stop()
+    except Exception:
+        transformed_feature_names = []
 
-    # transform dataset
+    # transform entire dataset
     try:
         X_trans = preproc.transform(X_clean)
+        if isinstance(X_trans, np.ndarray):
+            X_trans_arr = X_trans
+        else:
+            # sparse matrix fallback
+            X_trans_arr = X_trans.toarray()
     except Exception as e:
-        st.error(f"Failed to transform features: {e}")
+        st.error(f"Feature transformation failed: {e}")
         st.stop()
 
     # ensure labels numeric
     try:
         y_vals = pd.to_numeric(y_clean).values.astype(int)
     except Exception:
-        # attempt M/B mapping
         y_vals = y_clean.map(lambda x: 1 if str(x).lower().startswith('m') else 0).values.astype(int)
 
-    # progress updater for UI: show live convergence plot and progress bar
-    gen_plot = conv_placeholder.empty()
-    prog = progress_placeholder.empty()
-    def progress_updater(gen_index, best_score, conv_so_far, max_gen_local):
-        # progress bar
+    # progress updater closure to update UI
+    def ui_progress_updater(gen_index, best_score, conv_so_far, max_gen_local):
+        # progress
         frac = int((gen_index+1)/max_gen_local * 100)
-        prog.progress(frac)
-        # live convergence plot with Plotly
+        progress_placeholder.progress(frac)
+        # live convergence plot
         fig = go.Figure()
         fig.add_trace(go.Scatter(y=conv_so_far, mode='lines+markers', name='best_cv'))
-        fig.update_layout(title=f"BAT Convergence (gen {gen_index+1}/{max_gen_local})", xaxis_title="Generation", yaxis_title="Best CV Score")
-        gen_plot.plotly_chart(fig, use_container_width=True)
+        fig.update_layout(title=f"BAT Convergence (gen {gen_index+1}/{max_gen_local})", xaxis_title="Generation", yaxis_title="Best CV Score", height=400)
+        conv_placeholder.plotly_chart(fig, use_container_width=True)
+        status_placeholder.info(f"Running BAT: generation {gen_index+1}/{max_gen_local}")
 
-    # run BAT
+    # Run BAT
     try:
-        selected_feature_indices, convergence_curve = bat_feature_selection(
-            features=X_trans,
+        selected_indices, convergence_curve = bat_feature_selection(
+            features=X_trans_arr,
             labels=y_vals,
             num_bats=num_bats,
             max_gen=max_gen,
             loudness=loudness,
             pulse_rate=pulse_rate,
-            progress_updater=progress_updater,
+            progress_updater=ui_progress_updater,
             sleep_per_gen=sleep_per_gen
         )
     except Exception as e:
         st.error(f"BAT failed: {e}")
         st.stop()
 
-    prog.empty()
-    status_placeholder.info("BAT finished. Selected features computed.")
+    # clear progress
+    progress_placeholder.empty()
+    status_placeholder.success("BAT finished.")
 
-    if len(selected_feature_indices) == 0:
-        st.warning("BAT selected 0 features. Falling back to mutual information top features.")
-        mi = mutual_info_classif(X_trans, y_vals)
-        top_k = min(10, X_trans.shape[1])
-        selected_feature_indices = list(np.argsort(mi)[-top_k:])
+    if len(selected_indices) == 0:
+        st.warning("BAT selected no features. Falling back to mutual information selection (top features).")
+        mi = mutual_info_classif(X_trans_arr, y_vals)
+        top_k = min(10, X_trans_arr.shape[1])
+        selected_indices = list(np.argsort(mi)[-top_k:])
         convergence_curve = convergence_curve if len(convergence_curve) > 0 else [0.0]
 
-    # show selected names
-    selected_names = [transformed_feature_names[i] for i in selected_feature_indices]
-    st.success(f"Selected {len(selected_names)} features.")
+    selected_names = [transformed_feature_names[i] for i in selected_indices] if transformed_feature_names else [f"f{i}" for i in selected_indices]
+    st.success(f"Selected {len(selected_indices)} features.")
     st.write(selected_names)
 
-    # final convergence plot
+    # show final convergence plot
     try:
-        fig_final = px.line(y=convergence_curve, labels={'value':'Best CV Score', 'index':'Generation'}, title="BAT Convergence (final)")
+        fig_final = px.line(y=convergence_curve, labels={'value':'Best CV Score','index':'Generation'}, title="BAT Convergence (final)")
         fig_final.update_traces(mode='lines+markers')
         conv_placeholder.plotly_chart(fig_final, use_container_width=True)
     except Exception:
         pass
 
-    # Train final classifier on selected features
-    X_sel = X_trans[:, selected_feature_indices]
-    X_train, X_test, y_train, y_test = train_test_split(X_sel, y_vals, test_size=0.20, random_state=42, stratify=y_vals)
-    clf = GaussianNB()
+    # Train GaussianNB on selected features
     try:
+        X_sel = X_trans_arr[:, selected_indices]
+        X_train, X_test, y_train, y_test = train_test_split(X_sel, y_vals, test_size=0.20, random_state=42, stratify=y_vals)
+        clf = GaussianNB()
         clf.fit(X_train, y_train)
     except Exception as e:
         st.error(f"Training failed: {e}")
         st.stop()
 
-    # compute metrics and show
+    # metrics
     y_pred = clf.predict(X_test)
-    cm = confusion_matrix(y_test, y_pred)
     report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
     acc = float((y_pred == y_test).mean())
-    status_placeholder.success("Training complete.")
+    st.subheader("Model evaluation (hold-out test set)")
     metrics_placeholder.metric("Test accuracy", f"{acc:.3f}")
+    st.dataframe(pd.DataFrame(report).transpose().style.background_gradient(cmap='Blues'))
 
-    # show classification report
-    st.subheader("Model performance")
-    st.dataframe(pd.DataFrame(report).transpose().style.background_gradient(cmap="Blues"))
-
-    # confusion matrix (Plotly heatmap)
+    # Confusion matrix
+    cm = confusion_matrix(y_test, y_pred)
     cm_fig = go.Figure(data=go.Heatmap(z=cm, x=["Pred 0","Pred 1"], y=["True 0","True 1"], colorscale="Blues"))
     cm_fig.update_layout(title="Confusion Matrix")
     st.plotly_chart(cm_fig, use_container_width=True)
 
-    # ROC if available (GaussianNB has predict_proba)
+    # ROC plot if available
     try:
         y_prob = clf.predict_proba(X_test)[:,1]
         fpr, tpr, _ = roc_curve(y_test, y_prob)
@@ -429,13 +448,13 @@ if run_button:
     except Exception:
         pass
 
-    # feature importance by mutual info on selected features
+    # Feature importance (mutual info) for selected features
     try:
         if X_sel.shape[1] > 0:
             mi = mutual_info_classif(X_sel, y_vals)
-            mi_df = pd.DataFrame({"feature": selected_names, "mi": mi}).sort_values("mi", ascending=False)
-            st.subheader("Feature importance (mutual information on selected features)")
-            st.dataframe(mi_df.style.background_gradient(cmap='OrRd'))
+            mi_df = pd.DataFrame({'feature': selected_names, 'mi': mi}).sort_values('mi', ascending=False)
+            st.subheader("Feature importance (Mutual Information on selected features)")
+            st.dataframe(mi_df.style.background_gradient(cmap='Oranges'))
     except Exception:
         pass
 
@@ -444,7 +463,7 @@ if run_button:
         Path("models").mkdir(parents=True, exist_ok=True)
         dump(clf, "models/model.joblib")
         dump(preproc, "models/preprocessor.joblib")
-        np.save("models/selected_indices.npy", np.array(selected_feature_indices, dtype=int))
+        np.save("models/selected_indices.npy", np.array(selected_indices, dtype=int))
         with open("models/feature_names.json", "w") as f:
             json.dump(transformed_feature_names, f)
         np.save("models/convergence.npy", np.array(convergence_curve, dtype=float))
@@ -459,215 +478,153 @@ if run_button:
             json.dump(metadata, f, indent=2)
         st.sidebar.success("Saved model and artifacts to ./models/")
 
-    # store trained artifacts in memory for prediction below
-    trained_model = clf
-    transformed_feature_names_list = transformed_feature_names
-    selected_feature_indices_list = selected_feature_indices
-    convergence_curve_list = convergence_curve
+    # store in-memory for immediate prediction
+    trained_clf = clf
+    trained_preproc = preproc
+    transformed_feature_names_local = transformed_feature_names
+    selected_indices_local = selected_indices
+    convergence_curve_local = convergence_curve
 
-# ---- Patient prediction form (only after training OR if fallback model available) ----
+# -----------------------------------------------------------------------------
+# Patient Form and Prediction
+# -----------------------------------------------------------------------------
 st.markdown("---")
 st.header("🧾 Patient Prediction Form")
 
-# Decide which model and selected features to use:
-model_for_prediction = None
-sel_names_for_pred = []
-preprocessor_for_pred = None
-selected_idx_for_pred = []
+# Determine model / preprocessor to use for prediction:
+model_to_use = None
+preproc_to_use = None
+selected_idx_for_prediction = []
 
-# if we just trained in this session:
-if 'trained_model' in locals() and trained_model is not None:
-    model_for_prediction = trained_model
-    selected_idx_for_pred = selected_feature_indices
-    transformed_feature_names_list = transformed_feature_names
-    sel_names_for_pred = [transformed_feature_names_list[i] for i in selected_idx_for_pred] if len(selected_idx_for_pred)>0 else []
-    preprocessor_for_pred = preproc
-# else, if there are saved artifacts in ./models, try to load them so you can predict without retraining
+# If we trained above in-session, use that
+if 'trained_clf' in locals() and trained_clf is not None:
+    model_to_use = trained_clf
+    preproc_to_use = trained_preproc
+    selected_idx_for_prediction = selected_indices_local if 'selected_indices_local' in locals() else []
+# else try to load saved model
 else:
-    model_path = Path("models/model.joblib")
-    preproc_path = Path("models/preprocessor.joblib")
-    sel_idx_path = Path("models/selected_indices.npy")
-    feat_names_path = Path("models/feature_names.json")
-    if model_path.exists() and preproc_path.exists() and sel_idx_path.exists() and feat_names_path.exists():
-        try:
-            model_for_prediction = load(str(model_path))
-            preprocessor_for_pred = load(str(preproc_path))
-            selected_idx_for_pred = list(np.load(str(sel_idx_path)).astype(int))
-            with open(str(feat_names_path), 'r') as f:
-                transformed_feature_names_list = json.load(f)
-            sel_names_for_pred = [transformed_feature_names_list[i] for i in selected_idx_for_pred]
-            st.sidebar.info("Loaded pretrained model from ./models/")
-        except Exception as e:
-            st.sidebar.warning(f"Could not load saved model artifacts: {e}")
+    try:
+        if Path("models/model.joblib").exists():
+            model_to_use = load("models/model.joblib")
+        if Path("models/preprocessor.joblib").exists():
+            preproc_to_use = load("models/preprocessor.joblib")
+        if Path("models/selected_indices.npy").exists():
+            selected_idx_for_prediction = list(np.load("models/selected_indices.npy").astype(int))
+        if Path("models/feature_names.json").exists():
+            with open("models/feature_names.json", 'r') as f:
+                transformed_feature_names_local = json.load(f)
+    except Exception:
+        model_to_use = None
+        preproc_to_use = None
+        selected_idx_for_prediction = []
 
-# If no model available yet, show message and allow quick train
-if model_for_prediction is None:
-    st.info("Model not trained yet. Use 'Run BAT & Train' in the sidebar to create a model (or save a model to ./models/).")
-    # still show a light-weight quick test: let user train on all numeric features quickly
-    if st.button("Quick train (all numeric features, no BAT)"):
-        Xsmall = X_df.select_dtypes(include=[np.number]).copy()
-        if Xsmall.shape[1] == 0:
-            st.error("No numeric features to quick-train.")
-        else:
-            try:
-                Xt = Xsmall.values
-                yvals = pd.to_numeric(y_ser).values.astype(int)
-                Xtr, Xte, ytr, yte = train_test_split(Xt, yvals, test_size=0.2, random_state=42, stratify=yvals)
-                quick_clf = GaussianNB()
-                quick_clf.fit(Xtr, ytr)
-                model_for_prediction = quick_clf
-                preprocessor_for_pred = None
-                selected_idx_for_pred = list(range(Xsmall.shape[1]))
-                transformed_feature_names_list = list(Xsmall.columns)
-                sel_names_for_pred = transformed_feature_names_list
-                st.success("Quick model trained on numeric features.")
-            except Exception as e:
-                st.error(f"Quick train failed: {e}")
-
-# Build patient form using INPUT FEATURES (prefer original columns where possible)
-if model_for_prediction is not None:
-    # We want to build user-friendly inputs from original X_df columns.
-    # Determine original columns required: if preprocessor available we have metadata in `num_cols` and `cat_cols`.
-    st.write("Please provide patient values for the features selected by the model. Fields are generated for the *original* features used to construct the model.")
-    # If we trained and have preproc and selected indices, we must map transformed feature names back to original features.
-    orig_feature_inputs = {}
-    if preprocessor_for_pred is not None and len(selected_idx_for_pred) > 0:
-        # Find which original columns are involved in selected transformed features.
-        # Simpler approach: show inputs for all original numeric + categorical columns (but highlight selected ones)
-        # We collect original columns
-        original_cols = list(X_df.columns)
-        # Build UI inputs for all original cols (but it's fine — patient will fill essential ones)
-        with st.form("patient_form"):
-            user_values = {}
-            for col in original_cols:
-                if col in X_df.select_dtypes(include=[np.number]).columns:
-                    vmin = float(X_df[col].min())
-                    vmax = float(X_df[col].max())
-                    vmean = float(X_df[col].mean())
-                    user_values[col] = st.number_input(f"{col}", min_value=vmin, max_value=vmax, value=vmean, format="%.5f")
+if model_to_use is None:
+    st.info("Model not yet available for prediction. Run 'Run BAT & Train' in the sidebar or save a model to ./models/ and reload the app.")
+else:
+    st.write("Fill in patient details (fields inferred from the dataset). Only the features used by the model were considered during training; the app will preprocess inputs the same way.")
+    # Build inputs from original X_df columns (user-friendly)
+    user_inputs = {}
+    with st.form("patient_form"):
+        for col in X_df.columns:
+            if col in X_df.select_dtypes(include=[np.number]).columns:
+                vmin = float(X_df[col].min())
+                vmax = float(X_df[col].max())
+                vmean = float(X_df[col].mean())
+                # choose number_input for generality
+                user_inputs[col] = st.number_input(col, min_value=vmin, max_value=vmax, value=vmean, format="%.5f")
+            else:
+                uniques = X_df[col].dropna().unique().tolist()
+                if len(uniques) <= 12:
+                    user_inputs[col] = st.selectbox(col, options=uniques)
                 else:
-                    # categorical: show top categories or let user type
-                    uniques = X_df[col].dropna().unique().tolist()
-                    if len(uniques) <= 12:
-                        user_values[col] = st.selectbox(f"{col}", options=uniques, index=0)
-                    else:
-                        user_values[col] = st.text_input(f"{col}", value=str(uniques[0]))
-            submitted = st.form_submit_button("Predict Patient")
-        if submitted:
-            # Build a one-row DF using original_cols order
-            sample_row = {c: user_values.get(c, X_df[c].mean() if c in X_df.select_dtypes(include=[np.number]).columns else X_df[c].dropna().unique()[0]) for c in original_cols}
-            sample_df = pd.DataFrame([sample_row])[original_cols]
-            # Preprocess if preprocessor exists
+                    user_inputs[col] = st.text_input(col, value=str(uniques[0]))
+        submitted = st.form_submit_button("Predict Patient")
+
+    if submitted:
+        # Build one-row DataFrame in original order
+        sample_df = pd.DataFrame([user_inputs])[X_df.columns]
+        try:
+            sample_trans = preproc_to_use.transform(sample_df)
+            if not isinstance(sample_trans, np.ndarray):
+                sample_trans = sample_trans.toarray()
+        except Exception as e:
+            st.error(f"Preprocessing patient input failed: {e}")
+            sample_trans = None
+
+        if sample_trans is not None:
             try:
-                sample_trans = preprocessor_for_pred.transform(sample_df)
+                sample_sel = sample_trans[:, selected_idx_for_prediction]
             except Exception as e:
-                st.error(f"Failed to preprocess patient input: {e}")
-                sample_trans = None
-            if sample_trans is not None:
+                st.error(f"Selecting trained features from preprocessed input failed: {e}")
+                sample_sel = None
+
+            if sample_sel is not None:
                 try:
-                    sample_sel = sample_trans[:, selected_idx_for_pred]
-                except Exception as e:
-                    st.error(f"Failed to select model features from transformed input: {e}")
-                    sample_sel = None
-                if sample_sel is not None:
-                    try:
-                        pred = model_for_prediction.predict(sample_sel)[0]
-                        prob = model_for_prediction.predict_proba(sample_sel)[0][int(pred)] if hasattr(model_for_prediction, "predict_proba") else None
-                    except Exception as e:
-                        st.error(f"Failed to predict: {e}")
-                        pred = None
-                        prob = None
-                    if pred is not None:
-                        label = "Positive (Malignant)" if int(pred) == 1 else "Negative (Benign)"
-                        st.markdown(f"## Result: **{label}**")
-                        if prob is not None:
-                            st.metric("Model confidence", f"{prob:.2%}")
-                        # explanation
-                        if prob is None:
-                            st.write("The model has returned a prediction. No probability available.")
-                        else:
-                            if pred == 1:
-                                st.warning(explain_text := (
-                                    f"The model predicts a POSITIVE result with confidence {prob:.2%}. "
-                                    "This suggests the provided measurements are more similar to malignant cases from the training data. "
-                                    "Recommended next steps: clinical evaluation, imaging, specialist consultation and biopsy if clinically indicated."
-                                ))
-                            else:
-                                st.success(explain_text := (
-                                    f"The model predicts a NEGATIVE result with confidence {prob:.2%}. "
-                                    "This suggests the provided measurements are more similar to benign cases from the training data. "
-                                    "Recommended next steps: routine follow-up and clinical review if symptoms persist."
-                                ))
-                        # show summary and allow download
-                        outdf = sample_df.copy()
-                        outdf['prediction'] = int(pred)
-                        outdf['confidence'] = float(prob) if prob is not None else None
-                        st.subheader("Patient input summary")
-                        st.dataframe(outdf.T)
-                        st.download_button("Download patient result (CSV)", outdf.to_csv(index=False).encode('utf-8'), "patient_result.csv", "text/csv")
-    else:
-        # No preprocessor or selected indices: fallback simple form based on numeric features only
-        numeric_cols_local = X_df.select_dtypes(include=[np.number]).columns.tolist()
-        if not numeric_cols_local:
-            st.error("No numeric features available to build a quick patient form.")
-        else:
-            st.info("Model was trained on numeric-only quick fallback. Provide numeric inputs below.")
-            with st.form("quick_form"):
-                quick_vals = {}
-                for c in numeric_cols_local:
-                    vmin = float(X_df[c].min())
-                    vmax = float(X_df[c].max())
-                    vmean = float(X_df[c].mean())
-                    quick_vals[c] = st.number_input(c, min_value=vmin, max_value=vmax, value=vmean, format="%.5f")
-                submitted = st.form_submit_button("Predict (quick)")
-            if submitted:
-                try:
-                    sample_arr = np.array([list(quick_vals.values())])
-                    pred = model_for_prediction.predict(sample_arr)[0]
-                    prob = model_for_prediction.predict_proba(sample_arr)[0][int(pred)] if hasattr(model_for_prediction, "predict_proba") else None
+                    pred = model_to_use.predict(sample_sel)[0]
+                    prob = model_to_use.predict_proba(sample_sel)[0][int(pred)] if hasattr(model_to_use, "predict_proba") else None
                 except Exception as e:
                     st.error(f"Prediction failed: {e}")
                     pred = None
                     prob = None
+
                 if pred is not None:
                     label = "Positive (Malignant)" if int(pred) == 1 else "Negative (Benign)"
-                    st.markdown(f"## Result: **{label}**")
+                    if int(pred) == 1:
+                        st.error(f"🔴 {label}")
+                    else:
+                        st.success(f"🟢 {label}")
+
                     if prob is not None:
                         st.metric("Model confidence", f"{prob:.2%}")
-                    # explanation
-                    if pred == 1:
-                        st.warning("Model indicates possible malignancy. Seek medical advice.")
-                    else:
-                        st.success("Model indicates likely benign. Continue routine care.")
 
+                    st.markdown("### Explanation & Next Steps")
+                    st.write(explain_prediction_text(prob if prob is not None else 0, int(pred)))
+
+                    # show input summary and allow download
+                    outdf = sample_df.copy()
+                    outdf['prediction'] = int(pred)
+                    outdf['confidence'] = float(prob) if prob is not None else None
+                    st.subheader("Patient input summary")
+                    st.dataframe(outdf.T)
+                    st.download_button("Download patient result (CSV)", outdf.to_csv(index=False).encode('utf-8'), "patient_result.csv", "text/csv")
+
+# -----------------------------------------------------------------------------
+# Additional analysis charts (always available)
+# -----------------------------------------------------------------------------
 st.markdown("---")
-st.header("About & Write-up")
+st.header("Exploratory charts & write-up")
+
+# Correlation heatmap for numeric features
+if len(numeric_cols) > 1:
+    st.subheader("Correlation heatmap (numeric features)")
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sns.heatmap(X_df[numeric_cols].corr(), annot=False, cmap="coolwarm", ax=ax)
+    st.pyplot(fig)
+
+# Show top features used if available
+if 'selected_names' in locals() and selected_names:
+    st.subheader("Selected transformed features (sample list)")
+    st.write(selected_names[:30])
+
+# Final write-up / methodology
 st.markdown("""
-**Project purpose:**  
-This application demonstrates an end-to-end workflow for building a breast cancer predictive assistant that uses a bio-inspired **BAT** algorithm for feature selection and **Gaussian Naive Bayes** for classification.
+## Write-up — methodology & interpretation
 
-**What happens when you train:**
-1. The uploaded dataset is cleaned and preprocessed (categorical features are one-hot encoded; numeric features are scaled).  
-2. The BAT algorithm searches the transformed feature space for a compact subset of features that maximizes cross-validated accuracy.  
-3. A Gaussian Naive Bayes classifier is trained on the selected features and evaluated on a hold-out test set.  
-4. You get interactive charts (convergence, ROC, confusion matrix) and feature importance.
+**Goal:** Build a lightweight academic assistant that predicts probable breast cancer presence using a dataset of clinical/demographic or tumor-derived features.
 
-**Prediction & interpretation:**  
-- The patient form uses the same original features used to build the model; inputs are mapped and preprocessed the same way as during training.  
-- The model produces a prediction (Positive = likely malignant, Negative = likely benign) plus a confidence score.  
-- The app provides a written explanation and recommended next steps.  
-- **Important:** This is an academic demonstration. Predictions are probabilistic estimates based on the provided dataset and should not be used as a diagnostic device. Clinical decisions require healthcare professionals.
+**Pipeline summary:**
+1. **Upload/choose dataset**: The app accepts any CSV; use the sidebar to select the label/target column (0/1 or M/B).
+2. **Preprocessing**: Categorical columns are One-Hot Encoded (compatibly across scikit-learn versions). Numeric features are standardized.
+3. **Feature selection (BAT)**: A binary variant of the BAT algorithm explores subsets of transformed features and optimizes cross-validated accuracy using Gaussian Naive Bayes as an internal evaluator.
+4. **Training**: The final classifier is trained on the BAT-selected features and evaluated on a hold-out test set. The app displays accuracy, confusion matrix, ROC and a simple mutual-information-based feature importance for the chosen subset.
+5. **Prediction**: The patient form uses original feature inputs, which are preprocessed with the exact same pipeline and passed through the trained model. Output includes a probability and a textual explanation.
 
-**Notes & troubleshooting:**  
-- If your CSV does not contain a clear target column, use the dropdown in the sidebar to choose the correct label column.  
-- If BAT returns zero features, the app falls back to mutual information selection.  
-- If you want to persist models for quick reuse, check 'Save trained model...' in the sidebar to save artifacts to `./models/`.
+**Important limitations & disclaimers:**
+- This is an academic demonstrator only — NOT a clinical diagnostic tool.
+- Model performance and fairness depend heavily on the quality, size, and representativeness of the uploaded dataset.
+- Always consult qualified medical practitioners for real clinical decisions.
 """)
 
-# helper: small explanation function (used earlier)
-def explain_prediction(prob, label):
-    pct = (prob*100) if prob is not None else None
-    if label == 1:
-        return f"Predicted POSITIVE (malignancy). Model confidence: {pct:.1f}% — recommend clinical follow-up and diagnostic confirmation."
-    else:
-        return f"Predicted NEGATIVE (benign). Model confidence: {pct:.1f}% — continue routine surveillance and consult clinician if symptoms persist."
+# -----------------------------------------------------------------------------
+# End
+# -----------------------------------------------------------------------------
