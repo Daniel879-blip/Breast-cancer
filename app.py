@@ -32,7 +32,16 @@ from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.naive_bayes import GaussianNB
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.compose import ColumnTransformer
-from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc, precision_score, f1_score, accuracy_score
+from sklearn.metrics import (
+    confusion_matrix,
+    classification_report,
+    roc_curve,
+    auc,
+    precision_score,
+    f1_score,
+    accuracy_score,
+    recall_score,  # ADDED recall import
+)
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.utils import resample
 
@@ -515,19 +524,23 @@ if run_train:
     acc = float(accuracy_score(y_te, y_pred))
     prec = float(precision_score(y_te, y_pred, zero_division=0))
     f1 = float(f1_score(y_te, y_pred, zero_division=0))
+    rec = float(recall_score(y_te, y_pred, zero_division=0))  # ADDED recall computation
 
     # display metrics prominently
     with metrics_placeholder.container():
         st.subheader("Model performance (hold-out test)")
-        m1, m2, m3 = st.columns(3)
+        m1, m2, m3, m4 = st.columns(4)
         m1.metric("Accuracy", f"{acc:.3f}", delta=None)
         m2.metric("Precision", f"{prec:.3f}")
         m3.metric("F1 score", f"{f1:.3f}")
+        m4.metric("Recall", f"{rec:.3f}")  # SHOW recall as well
         st.markdown(
             "**How these metrics are calculated:**  \n"
             "- **Accuracy** = (correct predictions) / (total predictions). Computed with `accuracy_score(y_true, y_pred)`.  \n"
             "- **Precision** = true positives / (true positives + false positives). Computed with `precision_score(y_true, y_pred)`. "
             "It answers: *Of the samples predicted positive, how many actually were positive?*  \n"
+            "- **Recall** = true positives / (true positives + false negatives). Computed with `recall_score(y_true, y_pred)`. "
+            "Recall answers: *Of the actual positive samples, how many did the model detect?*  \n"
             "- **F1 score** = harmonic mean of precision and recall. Computed with `f1_score(y_true, y_pred)`. "
             "It balances precision and recall and is useful with imbalanced classes."
         )
@@ -673,7 +686,7 @@ def build_sample_from_patient(patient_dict, mapping_dict, Xdf):
             if pd.api.types.is_numeric_dtype(Xdf[c]):
                 row[c] = float(Xdf[c].mean())
             else:
-                vals = Xdf[c].dropna().unique().tolist()
+                vals = X_df[c].dropna().unique().tolist() if c in X_df.columns else []
                 row[c] = vals[0] if vals else ""
     return pd.DataFrame([row], columns=Xdf.columns)
 
@@ -808,4 +821,3 @@ st.markdown("""
 - This is a research/educational tool — **not a diagnostic device**.
 - Always consult healthcare professionals for diagnosis and treatment.
 """)
-
