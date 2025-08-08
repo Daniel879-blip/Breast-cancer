@@ -729,36 +729,16 @@ if st.session_state.get('selected_indices'):
 st.markdown("""
 ## Step-by-step: What the app does & how to interpret graphs
 
-**1) Load data / choose dataset**
-- Upload your CSV (must be tabular) or use the built-in synthetic balanced dataset.
-- Select which column is the label/target (0 = no cancer, 1 = cancer).
+**1) Data Upload**: The user uploads a CSV (patient data), and the app processes it. If no file is uploaded, the built-in synthetic dataset is used.
+**2) BAT Training**: BAT (Bat Algorithm) selects the best subset of features for classification. It runs through multiple generations, evolving the solution.
+**3) Model Prediction**: Once trained, the model is ready to predict based on user input.
+**4) Evaluation**: View performance metrics (accuracy, confusion matrix, ROC, etc.).
+**5) Prediction Explanation**: The app explains the result and next steps.
 
-**2) (Optional) Map patient-form fields**
-- If your dataset uses different column names, map the patient form fields to dataset columns using the sidebar mapping section.
-- This ensures that patient input maps correctly into the model preprocessing.
-
-**3) Run BAT & train**
-- Click **Run BAT & Train** in the sidebar. BAT (Bat Algorithm) searches for a good subset of *transformed* features (after one-hot encoding & scaling) that maximizes cross-validated accuracy.
-- You can adjust BAT parameters (number of bats, generations, loudness, pulse rate).
-- The live convergence plot shows best cross-validated score per generation.
-
-**4) Evaluate**
-- After training, view model performance: accuracy, confusion matrix, ROC curve, and feature importance (mutual information on selected features).
-- Use these charts to understand how well the model separates classes.
-
-**5) Predict**
-- Fill the **Patient Form** on the page and click Predict.
-- The form fields map to your dataset columns (via mapping). Missing columns are filled with dataset means/modes as fallbacks.
-- The model outputs Positive/Negative with a confidence score and a plain-language explanation.
-
-**Important limitations**
-- This is a prototype and educational tool — NOT a medical diagnostic device.
-- Model reliability depends on dataset size, quality, and representativeness. Always consult healthcare professionals.
+### Important notes:
+- This is a research/educational tool — **not a diagnostic device**.
+- Always consult healthcare professionals for diagnosis and treatment.
 """)
 
 st.markdown("---")
 st.write("If you'd like, I can now: 1) package `app.py` + `requirements.txt` + the synthetic CSV into a ZIP for download, or 2) run training here on the synthetic dataset and return the `models/` folder. Which would you like?")
-
-# -----------------------
-# End of file
-# -----------------------
