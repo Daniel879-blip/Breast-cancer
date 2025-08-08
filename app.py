@@ -1,3 +1,16 @@
+# app.py
+"""
+Breast Cancer Risk Predictor — medical patient form + BAT feature selection + GaussianNB
+Single-file Streamlit app with:
+- dataset upload or built-in synthetic dataset
+- target selection and column mapping UI
+- BAT parameters in sidebar + class balancing options
+- training (BAT -> selected features -> GaussianNB)
+- charts: BAT convergence, ROC, confusion matrix, class distribution, correlation heatmap, feature importance
+- hard-coded patient form fields that map to dataset columns (mapping editable)
+- step-by-step written explanations for training & predictions
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -234,22 +247,40 @@ columns = list(df_raw.columns)
 tgt_col = st.sidebar.selectbox("Select target (label) column", options=columns, index=columns.index("Target") if "Target" in columns else len(columns)-1)
 st.sidebar.write(f"Using target column: **{tgt_col}**")
 
-# -----------------------
-# Step-by-step Explanation
-# -----------------------
-st.markdown("""
-## Step-by-step: What the app does & how to interpret graphs
+# Patient form fields
+medical_fields = [
+    'Age','Sex','BMI','Family_History','Smoking_Status','Alcohol_Intake',
+    'Physical_Activity','Hormone_Therapy','Breastfeeding_History','Pregnancies'
+]
 
-**1) Data Upload**: Upload your dataset (CSV) or use the built-in synthetic dataset.
-**2) BAT Training**: The BAT algorithm selects important features for classification based on cross-validation scores.
-**3) Prediction**: The model predicts whether a given patient is likely to have benign or malignant breast cancer based on input features.
-**4) Evaluation**: Evaluate the model’s performance with metrics like accuracy, confusion matrix, ROC, and feature importance.
-**5) Interpretation**: The app explains the predictions in plain language, including next steps and confidence levels.
+st.sidebar.markdown("### Map patient-form fields to dataset columns")
+mapping = {}
+for f in medical_fields:
+    default = f if f in columns else "Not present"
+    options = ["Not present"] + columns
+    mapping[f] = st.sidebar.selectbox(f"{f} ->", options=options, index=options.index(default) if default in options else 0)
 
-### Important Notes:
-- This is a prototype for educational use and not for actual clinical diagnosis.
-- Always consult medical professionals for any health concerns or diagnostic decisions.
-""")
+# -----------------------
+# Prepare X, y for training
+# -----------------------
+def clean_and_prepare(df, target_col):
+    dfc = df.copy()
+    dfc = dfc.dropna(how='all')
+    if dfc[target_col].dtype == object or str(dfc[target_col].dtype).startswith('category'):
+        vals = [str(x).lower() for x in dfc[target_col].dropna().unique()]
+        if any(v.startswith('m') for v in vals) and any(v.startswith('b') for v in vals):
+            dfc[target_col] = dfc[target_col].map(lambda x: 1 if str(x).lower().startswith('m') else 0)
+        else:
+            try:
+                dfc[target_col] = pd.to_numeric(dfc[target_col])
+            except Exception:
+                pass
+    dfc = dfc.loc[dfc[target_col].notna()].reset_index(drop=True)
+    y = dfc[target_col].astype(int)
+    X = dfc.drop(columns=[target_col])
+    return X.reset_index(drop=True), y.reset_index(drop=True)
+
+X_df, y_ser = clean_and_prepare(df_raw, tgt_col)
 
 # -----------------------
 # Correlation heatmap
@@ -269,22 +300,6 @@ st.write(
     """
 )
 
-# -----------------------
-# Feature importance (Mutual Information)
-# -----------------------
-st.subheader("Feature Importance (Mutual Information)")
-mi = mutual_info_classif(X_df, y_ser)
-mi_df = pd.DataFrame({'Feature': X_df.columns, 'Mutual Information': mi}).sort_values('Mutual Information', ascending=False)
-st.dataframe(mi_df.style.background_gradient(cmap='Oranges'))
-st.write(
-    """
-    **Explanation:**
-    The **mutual information** score measures how much information a feature provides about the target variable. A higher value indicates that the feature is more important for classification.
-    - **High mutual information** features are the most useful for making predictions.
-    - This helps you understand which features are most important in predicting breast cancer risk.
-    """
-)
-
 # Distributions of numeric features (first 6)
 st.subheader("Numeric Feature Distributions (By Target)")
 for col in X_df.select_dtypes(include=[np.number]).columns[:6]:
@@ -300,28 +315,33 @@ for col in X_df.select_dtypes(include=[np.number]).columns[:6]:
     )
 
 # -----------------------
-# Charts & Analysis (always available)
+# Feature importance (Mutual Information)
 # -----------------------
-st.markdown("---")
-st.header("Charts, Analysis & Step-by-step Write-up")
+st.subheader("Feature Importance (Mutual Information)")
+mi = mutual_info_classif(X_df, y_ser)
+mi_df = pd.DataFrame({'Feature': X_df.columns, 'Mutual Information': mi}).sort_values('Mutual Information', ascending=False)
+st.dataframe(mi_df.style.background_gradient(cmap='Oranges'))
+st.write(
+    """
+    **Explanation:**
+    This table shows the **mutual information** between each feature and the target class. Higher mutual information indicates that the feature provides more valuable information to predict the target.
+    Features with **higher mutual information** are typically more important in classification.
+    """
+)
 
-# Feature importance (top 10)
-st.subheader("Top Features (Based on Mutual Information)")
-top_features = mi_df.head(10)
-st.write("These are the top 10 features based on mutual information, indicating their importance in predicting the target.")
-st.dataframe(top_features)
+# -----------------------
+# Step-by-step Explanation
+# -----------------------
+st.markdown("""
+## Step-by-step: What the app does & how to interpret graphs
 
-# Show model performance
-st.subheader("Model Performance Evaluation")
+**1) Data Upload**: Upload your dataset (CSV) or use the built-in synthetic dataset.
+**2) BAT Training**: The BAT algorithm selects important features for classification based on cross-validation scores.
+**3) Prediction**: The model predicts whether a given patient is likely to have benign or malignant breast cancer based on input features.
+**4) Evaluation**: Evaluate the model’s performance with metrics like accuracy, confusion matrix, ROC, and feature importance.
+**5) Interpretation**: The app explains the predictions in plain language, including next steps and confidence levels.
 
-# Placeholder for confusion matrix and other metrics
-if 'clf' in st.session_state:
-    clf = st.session_state['clf']
-    X_trans = st.session_state.get('X_trans')
-    y_test = st.session_state.get('y_test')
-    if X_trans is not None and y_test is not None:
-        y_pred = clf.predict(X_trans)
-        cm = confusion_matrix(y_test, y_pred)
-        fig_cm = go.Figure(data=go.Heatmap(z=cm, x=['Pred:0', 'Pred:1'], y=['True:0', 'True:1'], colorscale='Viridis'))
-        st.plotly_chart(fig_cm)
-        st.write("The confusion matrix provides insight into how many samples the model classified correctly (diagonal) vs incorrectly.")
+### Important Notes:
+- This is a prototype for educational use and not for actual clinical diagnosis.
+- Always consult medical professionals for any health concerns or diagnostic decisions.
+""")
