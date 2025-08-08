@@ -18,7 +18,7 @@ def bat_algorithm(features, labels, num_bats=20, max_gen=50, loudness=0.5, pulse
     best_idx = np.argmax(fitness)
     best_solution = positions[best_idx].copy()
     best_score = fitness[best_idx]
-    
+
     convergence_curve = [best_score]
 
     for t in range(max_gen):
